@@ -5,7 +5,7 @@ support an **agentic loop development process**: a chain in which each skill pro
 the next one consumes, so a feature can travel from an idea to an executable backlog without a human
 retyping it in between.
 
-**The loop today** — two skills, one handoff:
+**The loop today** — three skills, two handoffs:
 
 ```
            idea / need
@@ -22,8 +22,11 @@ retyping it in between.
                 │  tickets/NN-*.md
                 ▼
    ┌──────────────────────────┐
-   │   an agent works them    │  one ticket at a time; context stays small
-   └──────────────────────────┘
+   │ ticket-to-implementation │  one ticket at a time → code, or a written gap
+   └────────────┬─────────────┘
+                │  code + a status: done, or need more information
+                ▼
+        the next ticket
 ```
 
 `ado-create-items` is **not part of the loop yet** — see [Where this is going](#where-this-is-going).
@@ -81,6 +84,31 @@ or work items from an architecture or design document.
 
 ---
 
+### `ticket-to-implementation` — execute one ticket
+
+Takes a single ticket, reads it together with the `ARCHITECTURE.md` sections it cites and the code its
+dependencies produced, builds every detail of its **Job to do**, then verifies each acceptance
+criterion by *running* it. It returns the ticket in one of exactly two states — `**Status:** done`
+with every box ticked, or `**Status:** need more information` with the gaps written into the ticket
+itself. There is no "mostly done".
+
+Its governing rule is *never assume*: anything the ticket and the architecture leave unsettled that is
+visible from outside the code — a name another ticket will call, a format, a message, an exit code, a
+stored value — stops the run instead of being guessed. A guess is indistinguishable from a decision
+once it is in the code. Choices that stay internal to the module are made and recorded in a comment.
+
+The second rule is that *`done` is a claim about reality, not about effort*: it may only be written
+after the commands that prove it have run. Blocking questions go in the file rather than in chat, so
+the next run starts from the ticket and not from a lost transcript.
+
+**Use it when** you are asked to implement, do, execute or finish a ticket, a task file or a backlog
+item — or are handed a path to a numbered ticket.
+
+**Files:** `SKILL.md`, plus `references/` for the blocker-versus-judgment test and the status header,
+checkbox and blocking-comment formats.
+
+---
+
 ### `ado-create-items` — push a backlog to Azure DevOps
 
 > **Not part of the agentic loop at the moment.** It is developed separately, and will be folded in
@@ -98,9 +126,11 @@ content, judge content quality, delete anything, or manage state transitions.
 
 **Use it when** you have a written backlog and want it pushed into an ADO project.
 
-> **Status: design only.** `ARCHITECTURE.md` is the finished implementation contract; the
-> implementation under `scripts/` does not exist yet. Its own `tickets/` directory is generated
-> locally by `architecture-to-ticket` and is git-ignored.
+> **Status: in progress, and the loop's first subject.** `ARCHITECTURE.md` is the finished
+> implementation contract; `scripts/` is being built from it one ticket at a time by
+> `ticket-to-implementation`. The schema, the example manifest and the CLI skeleton exist — the
+> pipeline stages behind them are still stubs. Its own `tickets/` directory is generated locally by
+> `architecture-to-ticket` and is git-ignored.
 
 ---
 
@@ -112,10 +142,18 @@ file rather than conversational context:
 1. **`technical-design`** interviews you and commits `ARCHITECTURE.md` — the decision record.
 2. **`architecture-to-ticket`** slices that file into `tickets/NN-*.md` — the execution order, with a
    coverage map proving nothing in the document was dropped.
-3. An agent works the tickets one at a time; each is self-contained, so context stays small.
+3. **`ticket-to-implementation`** works them one at a time, each in its own context, and stamps the
+   ticket `done` or `need more information` when it finishes.
 
-Both steps can be re-run: the document is re-interviewed, the tickets are regenerated. That
-replayability is what makes the loop safe to hand to an agent.
+Every step can be re-run: the document is re-interviewed, the tickets are regenerated, a blocked
+ticket is answered and run again. That replayability is what makes the loop safe to hand to an agent.
+
+The three skills share one rule, which is the reason the chain holds: **each writes only what it was
+given, and marks what it was not.** `technical-design` marks an undecided topic rather than inventing
+a decision; `architecture-to-ticket` reports a gap rather than inventing a ticket;
+`ticket-to-implementation` stops on a silence rather than inventing a contract. An invention anywhere
+in the chain is indistinguishable from a decision by the time it reaches the code, so each step hands
+the question back to you instead of resolving it quietly.
 
 ---
 
@@ -163,8 +201,12 @@ skills/
 ├── architecture-to-ticket/    # in the loop:  ARCHITECTURE.md → tickets/
 │   ├── SKILL.md
 │   └── references/            # decomposition.md, ticket-format.md
+├── ticket-to-implementation/  # in the loop:  one ticket → code, or a written gap
+│   ├── SKILL.md
+│   └── references/            # clarity-gate.md, status-and-comments.md
 └── ado-create-items/          # not in the loop yet: manifest → ADO work items
     ├── ARCHITECTURE.md        # implementation contract
     ├── .gitignore             # tickets/ are generated locally, not committed
-    └── scripts/               # (not implemented yet)
+    ├── assets/                # workitems.example.json
+    └── scripts/               # apply.py, schema.json — built ticket by ticket
 ```
