@@ -1,1 +1,112 @@
-{}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kemtix.com/schemas/ado-create-items/workitems.schema.json",
+  "title": "workitems.json",
+  "description": "Manifest describing a tree of Azure DevOps work items to create. Structural rules only: uniqueness of `id`, parent resolution, cycles and legal parent/child type pairs are graph-level rules checked in code, not here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["organization", "project", "items"],
+  "properties": {
+    "organization": {
+      "description": "ADO organization name, e.g. `contoso`. Name only, not the full URL.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\]+$"
+    },
+    "project": {
+      "description": "Team project name, e.g. `MonProjet`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "namespace": {
+      "description": "Scopes the identity tag: `wi:<namespace>/<id>`. Use it when several manifests target the same project and might reuse an `id`.",
+      "type": "string",
+      "pattern": "^[a-z0-9]+([-/][a-z0-9]+)*$"
+    },
+    "defaults": {
+      "description": "Values inherited by every item that does not override them. Inheritance is per key; `tags` are merged, not replaced.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "area_path": { "$ref": "#/$defs/path" },
+        "iteration_path": { "$ref": "#/$defs/path" },
+        "tags": { "$ref": "#/$defs/tags" }
+      }
+    },
+    "items": {
+      "description": "The work items, as a flat array. Nesting is expressed only through `parent`.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "path": {
+      "description": "Area or iteration path, backslash-separated and prefixed with the project name, e.g. `MonProjet\\MES`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "description": "A tag. `;` is ADO's tag separator and would silently split the tag in two.",
+        "type": "string",
+        "pattern": "^[^;]+$"
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title"],
+      "not": {
+        "description": "`parent` and `parent_ado_id` are mutually exclusive.",
+        "required": ["parent", "parent_ado_id"]
+      },
+      "properties": {
+        "id": {
+          "description": "Stable identifier within the manifest (and within the `namespace`, if set). Never a generated UUID.",
+          "$ref": "#/$defs/identifier"
+        },
+        "type": {
+          "description": "Work item type (Agile process template).",
+          "enum": ["Epic", "Feature", "User Story", "Task", "Bug"]
+        },
+        "parent": {
+          "description": "The `id` of another item in the same manifest. Absent or null means a root item. Never an ADO work item ID.",
+          "type": ["string", "null"],
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "parent_ado_id": {
+          "description": "An existing ADO work item ID, to hang a new subtree under something already on the board.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "description": "Plain text.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "description": {
+          "description": "Maps to System.Description, except for Bug which maps to Microsoft.VSTS.TCM.ReproSteps.",
+          "type": "string"
+        },
+        "area_path": { "$ref": "#/$defs/path" },
+        "iteration_path": { "$ref": "#/$defs/path" },
+        "tags": { "$ref": "#/$defs/tags" },
+        "order": {
+          "description": "Sorts this item among its siblings, ascending. Excluded from the content hash.",
+          "type": "integer"
+        },
+        "fields": {
+          "description": "ADO field reference name -> value, written verbatim. The escape hatch: values are deliberately unconstrained.",
+          "type": "object"
+        }
+      }
+    }
+  }
+}
