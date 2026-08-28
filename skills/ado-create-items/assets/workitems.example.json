@@ -1,1 +1,84 @@
-{}
+{
+  "organization": "contoso",
+  "project": "MonProjet",
+  "namespace": "oee-2026-08",
+  "defaults": {
+    "area_path": "MonProjet\\MES",
+    "iteration_path": "MonProjet\\PI-12",
+    "tags": ["oee"]
+  },
+  "items": [
+    {
+      "id": "epic-oee",
+      "type": "Epic",
+      "order": 10,
+      "title": "Enrichissement OEE de l'entête recette",
+      "description": "Exposer les composantes OEE (Disponibilité, Performance, Qualité) dans l'entête recette pour les consommateurs SCADA et MES."
+    },
+    {
+      "id": "feat-oee-header",
+      "type": "Feature",
+      "parent": "epic-oee",
+      "order": 20,
+      "title": "Calcul OEE temps réel dans le MonitorService",
+      "description": "Le MonitorService calcule et publie les trois composantes OEE dans l'entête recette à chaque cycle.",
+      "tags": ["monitorservice"]
+    },
+    {
+      "id": "us-oee-availability",
+      "type": "User Story",
+      "parent": "feat-oee-header",
+      "order": 10,
+      "title": "En tant qu'opérateur SCADA, je vois la disponibilité machine dans l'entête recette",
+      "description": "La disponibilité est publiée dans l'entête recette et rafraîchie à chaque cycle du MonitorService.",
+      "fields": {
+        "Microsoft.VSTS.Common.AcceptanceCriteria": "<div>La disponibilité est exposée en pourcentage, avec une décimale.</div><div>La valeur est rafraîchie à chaque cycle du MonitorService.</div>",
+        "Microsoft.VSTS.Scheduling.StoryPoints": 5
+      }
+    },
+    {
+      "id": "task-oee-availability-calc",
+      "type": "Task",
+      "parent": "us-oee-availability",
+      "order": 10,
+      "title": "Implémenter le calcul de la composante Disponibilité",
+      "description": "Ajouter le calcul de disponibilité dans le pipeline de traitement du MonitorService.",
+      "fields": {
+        "Microsoft.VSTS.Scheduling.OriginalEstimate": 4
+      }
+    },
+    {
+      "id": "bug-oee-rounding",
+      "type": "Bug",
+      "parent": "feat-oee-header",
+      "order": 20,
+      "title": "L'arrondi de la disponibilité diverge entre le SCADA et le MES",
+      "description": "Le SCADA affiche 87,4 % là où le MES affiche 87,5 % pour le même cycle : les deux consommateurs n'arrondissent pas au même endroit.",
+      "area_path": "MonProjet\\MES\\Qualité"
+    },
+    {
+      "id": "task-oee-rounding-fix",
+      "type": "Task",
+      "parent": "bug-oee-rounding",
+      "order": 10,
+      "title": "Centraliser l'arrondi des composantes OEE dans le MonitorService",
+      "description": "Arrondir une seule fois, à la publication, et laisser les consommateurs afficher la valeur telle quelle."
+    },
+    {
+      "id": "feat-oee-export",
+      "type": "Feature",
+      "parent": "epic-oee",
+      "order": 10,
+      "title": "Export des indicateurs OEE vers le reporting",
+      "description": "Les composantes OEE de l'entête recette sont exportées pour alimenter le reporting de production."
+    },
+    {
+      "id": "us-oee-export-csv",
+      "type": "User Story",
+      "parent": "feat-oee-export",
+      "order": 10,
+      "title": "En tant qu'analyste production, j'exporte les indicateurs OEE d'une campagne en CSV",
+      "description": "L'export couvre les trois composantes OEE, une ligne par cycle, pour la plage de dates demandée."
+    }
+  ]
+}
