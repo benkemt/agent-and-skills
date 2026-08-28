@@ -20,10 +20,23 @@ missing third-party package.
 
 import argparse
 import json
+import re
 import sys
 from enum import IntEnum
+from pathlib import Path
+
+try:
+    # Optional: the schema is validated by hand when this is absent, so a
+    # missing third-party package never stops a run (see the module docstring).
+    import jsonschema
+except ImportError:  # pragma: no cover - depends on the environment
+    jsonschema = None
 
 PROG = "apply.py"
+
+# Resolved relative to this file, never to the working directory: the schema
+# ships with the script and must be found wherever apply.py is invoked from.
+SCHEMA_PATH = Path(__file__).parent / "schema.json"
 
 
 class ExitCode(IntEnum):
@@ -47,10 +60,13 @@ class StageError(Exception):
     ends the process.
     """
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, reported=False):
         super().__init__(message)
         self.code = ExitCode(code)
         self.message = message
+        # Set when the stage already printed its own diagnostics in the format
+        # the contract specifies, so ``main`` must not add a line to them.
+        self.reported = reported
 
 
 class Context:
@@ -322,6 +338,288 @@ def parse_args(argv):
 
 
 # --------------------------------------------------------------------------- #
+# Schema validation — ARCHITECTURE.md §6.1 (schema level), §10 (validation table)
+#
+# Two error sources — `jsonschema` when it is installed, the hand-rolled walker
+# below when it is not — but a single message formatter, so the output does not
+# depend on what happens to be installed. Messages name the offending value and
+# the rule; a schema library's raw jargon is not actionable.
+# --------------------------------------------------------------------------- #
+
+_JSON_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "number": (int, float),
+    "integer": int,
+    "boolean": bool,
+    "null": type(None),
+}
+
+
+def load_schema():
+    """Read ``schema.json``.
+
+    Deliberately unguarded: the schema is part of the script, so its absence is
+    a broken installation rather than a manifest problem, and none of the §8.3
+    exit codes describes that. The traceback names the missing path, which is
+    the useful answer to "why is my checkout incomplete".
+    """
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def validate_schema(manifest):
+    """Validate the raw manifest — before inheritance — against ``schema.json``.
+
+    Returns every problem as a sorted list of ``(pointer, message)``. Reporting
+    all of them at once is the point: one editing pass fixes the file.
+    """
+    schema = load_schema()
+    if jsonschema is not None:
+        errors = _errors_from_jsonschema(schema, manifest)
+    else:
+        errors = _errors_from_fallback(schema, manifest, schema)
+
+    # The root object itself has no name; a rule about one of its keys reports
+    # against that key, so only a whole-document error is left unnamed.
+    named = {(pointer or "(root)", message) for pointer, message in errors}
+    return sorted(named, key=lambda pair: (_sort_key(pair[0]), pair[1]))
+
+
+def _errors_from_jsonschema(schema, manifest):
+    """Collect every error via ``iter_errors``, reworded by the shared formatter."""
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = []
+    for error in validator.iter_errors(manifest):
+        pointer = _pointer(list(error.absolute_path))
+        described = _message(error.validator, error.validator_value, error.instance,
+                             error.schema, pointer)
+        # A keyword the formatter does not cover: the library's own wording beats
+        # inventing one, and it still names the offending value.
+        errors.append(described or (pointer, error.message))
+    return errors
+
+
+def _errors_from_fallback(schema, instance, root, pointer=""):
+    """Hand-rolled checker covering the keywords ``schema.json`` actually uses.
+
+    It walks the schema rather than restating its rules, so the two branches
+    cannot drift apart when the schema changes.
+    """
+    schema = _resolve(schema, root)
+    errors = []
+
+    if "type" in schema and not _type_matches(schema["type"], instance):
+        return [_described(_message("type", schema["type"], instance, schema, pointer))]
+
+    if "enum" in schema and instance not in schema["enum"]:
+        return [_described(_message("enum", schema["enum"], instance, schema, pointer))]
+
+    if isinstance(instance, str):
+        for keyword in ("pattern", "minLength", "maxLength"):
+            if keyword in schema and not _string_ok(keyword, schema[keyword], instance):
+                errors.append(_described(_message(keyword, schema[keyword], instance, schema, pointer)))
+
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema and instance < schema["minimum"]:
+            errors.append(_described(_message("minimum", schema["minimum"], instance, schema, pointer)))
+
+    if isinstance(instance, list):
+        if "minItems" in schema and len(instance) < schema["minItems"]:
+            errors.append(_described(_message("minItems", schema["minItems"], instance, schema, pointer)))
+        if "items" in schema:
+            for index, entry in enumerate(instance):
+                errors.extend(_errors_from_fallback(
+                    schema["items"], entry, root, "%s[%d]" % (pointer, index)))
+
+    if isinstance(instance, dict):
+        for key in schema.get("required", []):
+            if key not in instance:
+                errors.append(_described(_message(
+                    "required", schema["required"], instance, schema, pointer, key)))
+        if schema.get("additionalProperties") is False:
+            for key in sorted(set(instance) - set(schema.get("properties", {}))):
+                errors.append(_described(_message(
+                    "additionalProperties", False, instance, schema, pointer, key)))
+        forbidden = _resolve(schema.get("not", {}), root).get("required")
+        if forbidden and all(key in instance for key in forbidden):
+            errors.append(_described(_message("not", schema["not"], instance, schema, pointer)))
+        for key, subschema in schema.get("properties", {}).items():
+            if key in instance:
+                errors.extend(_errors_from_fallback(
+                    subschema, instance[key], root, _join(pointer, key)))
+
+    return errors
+
+
+def _message(keyword, expected, value, subschema, pointer, key=None):
+    """The single source of wording, shared by both branches.
+
+    Returns ``(pointer, message)`` — a rule about a named key reports against
+    that key, so it sorts next to the other errors on the same item.
+    """
+    if keyword == "required":
+        missing = [key] if key else [k for k in expected if not _has(value, k)]
+        if not missing:
+            return None
+        return (_join(pointer, missing[0]), "missing required key")
+
+    if keyword == "additionalProperties":
+        extras = [key] if key else sorted(set(value) - set(subschema.get("properties", {})))
+        if not extras:
+            return None
+        return (_join(pointer, extras[0]),
+                "unknown key — the manifest schema does not define it")
+
+    if keyword == "not":
+        # The only `not` in the schema is the parent/parent_ado_id exclusion.
+        forbidden = (subschema.get("not") or {}).get("required") or []
+        if sorted(forbidden) == ["parent", "parent_ado_id"]:
+            return (pointer, "'parent' and 'parent_ado_id' are mutually exclusive")
+        return None
+
+    if keyword == "type":
+        return (pointer, "expected %s, got %s (%s)" % (
+            _type_names(expected), _type_of(value), _brief(value)))
+
+    if keyword == "enum":
+        return (pointer, "%s is not valid — expected one of %s" % (
+            _brief(value), ", ".join(str(option) for option in expected)))
+
+    if keyword == "maxLength":
+        return (pointer, "too long: %d characters (max %d)" % (len(value), expected))
+
+    if keyword == "minLength":
+        if expected == 1 and value == "":
+            return (pointer, "empty — at least 1 character is required")
+        return (pointer, "too short: %d characters (min %d)" % (len(value), expected))
+
+    if keyword == "minItems":
+        if expected == 1 and not value:
+            # §10: an empty run is more likely a bug than an intention.
+            return (pointer, "empty — an empty run is more likely a bug than an intention")
+        return (pointer, "too few entries: %d (min %d)" % (len(value), expected))
+
+    if keyword == "minimum":
+        return (pointer, "%s is below the minimum of %s" % (_brief(value), expected))
+
+    if keyword == "pattern":
+        if expected == "^[^;]+$":
+            # The trap worth naming: ';' is ADO's tag separator.
+            return (pointer, "tag contains ';' — ADO would split it in two")
+        if expected == "^[a-z0-9]+(-[a-z0-9]+)*$":
+            return (pointer, "%s is not a valid id — lower-case letters, digits and "
+                             "single '-' separators only" % _brief(value))
+        return (pointer, "%s does not match %s" % (_brief(value), expected))
+
+    return None
+
+
+def _described(described):
+    """Unwrap a formatted error.
+
+    The fallback branch only asks the formatter for keywords it covers, so a
+    ``None`` here is a bug in this module rather than a manifest problem.
+    """
+    if described is None:
+        raise AssertionError("schema keyword reached the fallback unformatted")
+    return described
+
+
+def _resolve(schema, root):
+    """Follow a local ``$ref`` — the schema uses ``#/$defs/...`` only."""
+    while isinstance(schema, dict) and "$ref" in schema:
+        target = root
+        for step in schema["$ref"].lstrip("#/").split("/"):
+            target = target[step]
+        schema = target
+    return schema if isinstance(schema, dict) else {}
+
+
+def _type_matches(expected, value):
+    names = expected if isinstance(expected, list) else [expected]
+    for name in names:
+        python_type = _JSON_TYPES.get(name)
+        if python_type is None:
+            continue
+        if name in ("integer", "number") and isinstance(value, bool):
+            continue  # JSON booleans are not numbers
+        if isinstance(value, python_type):
+            return True
+    return False
+
+
+def _string_ok(keyword, expected, value):
+    if keyword == "pattern":
+        return re.search(expected, value) is not None
+    if keyword == "minLength":
+        return len(value) >= expected
+    return len(value) <= expected
+
+
+def _has(instance, key):
+    return isinstance(instance, dict) and key in instance
+
+
+def _type_names(expected):
+    names = expected if isinstance(expected, list) else [expected]
+    return " or ".join(names)
+
+
+def _type_of(value):
+    for name, python_type in _JSON_TYPES.items():
+        if name in ("integer", "number") and isinstance(value, bool):
+            continue
+        if isinstance(value, python_type):
+            return name
+    return type(value).__name__
+
+
+def _brief(value):
+    """A short, quoted rendering of the offending value."""
+    text = json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= 60 else text[:57] + "…"
+
+
+def _join(pointer, key):
+    return "%s.%s" % (pointer, key) if pointer else key
+
+
+def _pointer(path):
+    """Render a JSON path as ``items[3].tags[0]``.
+
+    An empty path is the document itself and stays empty here, so a key joined
+    onto it reads ``organization`` rather than ``(root).organization``.
+    """
+    rendered = ""
+    for step in path:
+        if isinstance(step, int):
+            rendered += "[%d]" % step
+        else:
+            rendered = _join(rendered, step)
+    return rendered
+
+
+def _sort_key(pointer):
+    """Sort by pointer in document order — ``items[2]`` before ``items[10]``.
+
+    Plain string order would interleave the items of a manifest with ten or more
+    entries, and the point of listing every error is a single top-to-bottom
+    editing pass.
+    """
+    return [int(part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", pointer)]
+
+
+def report_validation_errors(errors):
+    """Print every error, one per line, aligned, in the contract's format."""
+    width = max(len(pointer) for pointer, _ in errors)
+    for pointer, message in errors:
+        sys.stderr.write("VALIDATION  %-*s  %s\n" % (width, pointer, message))
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline stages — ARCHITECTURE.md §6
 #
 #   load -> validate -> authenticate -> pre-check -> reconcile -> plan
@@ -364,11 +662,22 @@ def load(ctx):
 
 
 def validate(ctx):
-    """Stage 1 — schema (ticket 06) and graph (ticket 07) checks. No network.
+    """Stage 1 — schema (this stage) and graph (ticket 07) checks. No network.
 
     Reports every problem at once, then raises ``StageError(VALIDATION)``.
+    Nothing is written and no network call is made unless validation passed
+    completely (invariant 2), so this runs before authentication.
     """
-    log(ctx.args, "validate: not implemented yet")
+    log(ctx.args, "validating against %s" % SCHEMA_PATH)
+    errors = validate_schema(ctx.manifest)
+    if errors:
+        report_validation_errors(errors)
+        raise StageError(
+            ExitCode.VALIDATION,
+            "%d schema error(s)" % len(errors),
+            reported=True,
+        )
+    log(ctx.args, "schema validation passed")
 
 
 def authenticate(ctx):
@@ -470,7 +779,8 @@ def main(argv=None):
     try:
         return int(run(Context(args)))
     except StageError as exc:
-        sys.stderr.write("%s: error: %s\n" % (PROG, exc.message))
+        if not exc.reported:
+            sys.stderr.write("%s: error: %s\n" % (PROG, exc.message))
         return int(exc.code)
 
 
