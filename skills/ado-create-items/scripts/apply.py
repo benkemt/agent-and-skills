@@ -87,6 +87,114 @@ def log(args, message):
 
 
 # --------------------------------------------------------------------------- #
+# Item model — ARCHITECTURE.md §4.1 (root block), §4.2 (item fields)
+# --------------------------------------------------------------------------- #
+
+
+class Item:
+    """One entry of the manifest's ``items`` array, defaults already resolved.
+
+    This is the single source for every downstream stage: nothing after the load
+    stage re-reads ``defaults``, so the inheritance rules live here and nowhere
+    else.
+
+    ``index`` is the item's position in the declared ``items`` array. Ticket 14
+    uses it as the stable tiebreaker when sorting siblings by ``order``, so it
+    must survive loading — it is the manifest's own declaration order.
+
+    ``raw`` keeps the untouched source entry; schema validation (ticket 06)
+    reports against the manifest as written, not against the resolved view.
+    """
+
+    def __init__(self, index, raw, defaults):
+        self.index = index
+        self.raw = raw
+
+        self.id = raw.get("id")
+        self.type = raw.get("type")
+        # `parent` holds a manifest id, never an ADO id (invariant 6). Absent or
+        # null both mean a root item.
+        self.parent = raw.get("parent")
+        self.parent_ado_id = raw.get("parent_ado_id")
+
+        title = raw.get("title")
+        # Light normalisation only. A non-string title is left alone for
+        # validation to report with the actual type.
+        self.title = title.strip() if isinstance(title, str) else title
+
+        # Content is never authored, rewritten, improved or translated (§1
+        # non-goals): the description goes to ADO exactly as written, including
+        # a placeholder like "[À compléter]". Same for `fields`, the escape
+        # hatch — passed through verbatim.
+        self.description = raw.get("description")
+        self.fields = raw.get("fields")
+
+        # Inheritance is per key, not all-or-nothing (§4.1): an item that sets
+        # only `area_path` still inherits `iteration_path`.
+        self.area_path = _inherit(raw, defaults, "area_path")
+        self.iteration_path = _inherit(raw, defaults, "iteration_path")
+        # Tags are merged with the defaults rather than replacing them (§4.2).
+        self.tags = _merge_tags(defaults.get("tags"), raw.get("tags"))
+
+        self.order = raw.get("order")
+
+    def __repr__(self):
+        return "<Item %d %s %r>" % (self.index, self.type, self.id)
+
+
+def _inherit(raw, defaults, key):
+    """The item's value if present, else ``defaults[key]``, else unset."""
+    value = raw.get(key)
+    return defaults.get(key) if value is None else value
+
+
+def _merge_tags(default_tags, item_tags):
+    """``defaults.tags`` then the item's tags, de-duplicated, order preserved.
+
+    De-duplication is exact-match: a tag differing only in case is a different
+    tag here, and validation is what judges tag content.
+    """
+    merged = []
+    for source in (default_tags, item_tags):
+        # A non-list here is a schema error; leave it to validation rather than
+        # iterating a string into single characters.
+        if not isinstance(source, list):
+            continue
+        for tag in source:
+            if tag not in merged:
+                merged.append(tag)
+    return merged
+
+
+def resolve_items(manifest):
+    """Build the resolved item model from a raw manifest.
+
+    Tolerant by design: this runs *before* validation (§6), so a malformed
+    manifest must reach the validate stage and exit 2 with every problem listed,
+    not die here with a traceback or a misleading exit 4. Anything unusable is
+    skipped and left for validation to report from ``raw``.
+    """
+    if not isinstance(manifest, dict):
+        return []
+
+    defaults = manifest.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+
+    raw_items = manifest.get("items")
+    if not isinstance(raw_items, list):
+        return []
+
+    # The index is the position in the declared array, so skipping an unusable
+    # entry never shifts another item's declaration order.
+    return [
+        Item(index, raw, defaults)
+        for index, raw in enumerate(raw_items)
+        if isinstance(raw, dict)
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Argument parsing
 # --------------------------------------------------------------------------- #
 
@@ -225,10 +333,14 @@ def parse_args(argv):
 
 
 def load(ctx):
-    """Read the manifest. Ticket 05 adds ``defaults`` inheritance.
+    """Read the manifest and resolve ``defaults`` into the item model.
 
     An unreadable or non-JSON manifest is a usage problem, not a content
-    problem: exit 4, not 2.
+    problem: exit 4, not 2. The message carries the path and the parse position,
+    which is what actually locates the typo.
+
+    Content problems are *not* raised here — they belong to the validate stage,
+    which reports them all at once and exits 2.
     """
     path = ctx.args.manifest
     log(ctx.args, "loading manifest %s" % path)
@@ -245,6 +357,9 @@ def load(ctx):
             ExitCode.USAGE,
             "manifest %s is not valid JSON: %s" % (path, exc),
         )
+
+    ctx.items = resolve_items(ctx.manifest)
+    log(ctx.args, "loaded %d item(s)" % len(ctx.items))
     return ctx.manifest
 
 
